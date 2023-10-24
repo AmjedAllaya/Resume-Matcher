@@ -1,0 +1,2 @@
+qdrant token:gPtNSVWW7eDEfCZt22k_CPEQOxIP-fW9fRlVa4WUCKZoCHZWA2waUw
+cohere token: QkoBm7ie9umYn3ct0WnimbQQbPaFBLxk5ARBypQ0
