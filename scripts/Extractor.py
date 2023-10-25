@@ -206,3 +206,39 @@ class DataExtractor:
         entities = [
             token.text for token in self.doc.ents if token.label_ in entity_labels]
         return list(set(entities))
+
+    def extract_addresses(self):
+        # Add address extraction logic here
+        pass
+
+    def extract_education(self):
+        # Add education extraction logic here
+        pass
+
+    def extract_skills(self):
+        # Add skills extraction logic here
+        pass
+
+    def extract_projects(self):
+        # Add projects extraction logic here
+        pass
+
+    def extract_certifications(self):
+        # Add certifications extraction logic here
+        pass
+
+    def extract_awards(self):
+        # Add awards extraction logic here
+        pass
+
+    def extract_honors(self):
+        # Add honors extraction logic here
+        pass
+
+    def extract_publications(self):
+        # Add publications extraction logic here
+        pass
+
+    def extract_references(self):
+        # Add references extraction logic here
+        pass
