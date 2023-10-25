@@ -1,10 +1,11 @@
 import json
 import logging
 import os
-import numpy as np
-from gensim.models import Word2Vec
-import faiss
 
+import cohere
+import yaml
+from qdrant_client import QdrantClient, models
+from qdrant_client.http.models import Batch
 
 logging.basicConfig(
     filename='app_similarity_score.log',
@@ -29,63 +30,146 @@ logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 
-def train_word2vec(data):
-    # Train a Word2Vec model on the provided data.
-    model = Word2Vec(sentences=data, vector_size=100, window=5, min_count=1, sg=1)
-    model.save("word2vec.model")
+def find_path(folder_name):
+    curr_dir = os.getcwd()
+    while True:
+        if folder_name in os.listdir(curr_dir):
+            return os.path.join(curr_dir, folder_name)
+        else:
+            parent_dir = os.path.dirname(curr_dir)
+            if parent_dir == '/':
+                break
+            curr_dir = parent_dir
+    raise ValueError(f"Folder '{folder_name}' not found.")
 
-def get_embedding(text, model):
+
+cwd = find_path('Resume-Matcher')
+READ_RESUME_FROM = os.path.join(cwd, 'Data', 'Processed', 'Resumes')
+READ_JOB_DESCRIPTION_FROM = os.path.join(cwd, 'Data', 'Processed', 'JobDescription')
+config_path = os.path.join(cwd, "scripts", "similarity")
+
+
+def read_config(filepath):
     try:
-        embeddings = [model.wv[word] for word in text.split() if word in model.wv]
-        if not embeddings:
-            return None
-        return embeddings[0]
+        with open(filepath) as f:
+            config = yaml.safe_load(f)
+        return config
+    except FileNotFoundError as e:
+        logger.error(f"Configuration file {filepath} not found: {e}")
+    except yaml.YAMLError as e:
+        logger.error(f"Error parsing YAML in configuration file {filepath}: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"Error getting embeddings: {e}", exc_info=True)
+        logger.error(f"Error reading configuration file {filepath}: {e}")
+    return None
 
-class SimilarityScorer:
+
+def read_doc(path):
+    with open(path) as f:
+        try:
+            data = json.load(f)
+        except Exception as e:
+            logger.error(f'Error reading JSON file: {e}')
+            data = {}
+    return data
+
+
+class QdrantSearch:
     def __init__(self, resumes, jd):
+        config = read_config(config_path + "/config.yml")
+        self.cohere_key = config['cohere']['api_key']
+        self.qdrant_key = config['qdrant']['api_key']
+        self.qdrant_url = config['qdrant']['url']
         self.resumes = resumes
         self.jd = jd
+        self.cohere = cohere.Client(self.cohere_key)
+        self.collection_name = "resume_collection_name"
+        self.qdrant = QdrantClient(
+            url=self.qdrant_url,
+            api_key=self.qdrant_key,
+        )
+
+        vector_size = 4096
+        print(f"collection name={self.collection_name}")
+        self.qdrant.recreate_collection(
+            collection_name=self.collection_name,
+            vectors_config=models.VectorParams(
+                size=vector_size,
+                distance=models.Distance.COSINE
+            )
+        )
+
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.train_word2vec(resumes)
+
+        self.logger.addHandler(console_handler)
+        self.logger.addHandler(file_handler)
+
+    def get_embedding(self, text):
+        try:
+            embeddings = self.cohere.embed([text], "large").embeddings
+            return list(map(float, embeddings[0])), len(embeddings[0])
+        except Exception as e:
+            self.logger.error(f"Error getting embeddings: {e}", exc_info=True)
+
+    def update_qdrant(self):
+        vectors = []
+        ids = []
+        for i, resume in enumerate(self.resumes):
+            vector, size = self.get_embedding(resume)
+            vectors.append(vector)
+            ids.append(i)
+        try:
+            self.qdrant.upsert(
+                collection_name=self.collection_name,
+                points=Batch(
+                    ids=ids,
+                    vectors=vectors,
+                    payloads=[{"text": resume} for resume in self.resumes]
+
+                )
+            )
+        except Exception as e:
+            self.logger.error(f"Error upserting the vectors to the qdrant collection: {e}", exc_info=True)
 
     def search(self):
-        # Load the Word2Vec model
-        model = Word2Vec.load("word2vec.model")
+        vector, _ = self.get_embedding(self.jd)
 
-        # Create a Faiss index and normalize vectors
-        index = faiss.IndexFlatL2(100)
-        vectors = [get_embedding(resume, model) for resume in self.resumes]
-        vectors = [vector for vector in vectors if vector is not None]
-        faiss_vectors = np.array(vectors, dtype=np.float32)
-        faiss.normalize_L2(faiss_vectors)
-        index.add(faiss_vectors)
+        hits = self.qdrant.search(
+            collection_name=self.collection_name,
+            query_vector=vector,
+            limit=30
+        )
+        results = []
+        for hit in hits:
+            result = {
+                'text': str(hit.payload)[:30],
+                'score': hit.score
+            }
+            results.append(result)
 
-        # Query the index with the job description vector
-        jd_vector = get_embedding(self.jd, model)
-        if jd_vector is not None:
-            faiss.normalize_L2(jd_vector)
-            D, I = index.search(np.array([jd_vector], dtype=np.float32), 30)
+        return results
 
-            results = []
-            for i, idx in enumerate(I[0]):
-                result = {
-                    'text': self.resumes[idx][:30],
-                    'score': 1 / (1 + D[0][i])
-                }
-                results.append(result)
-            return results
-        else:
-            return []
 
-# Example usage
+def get_similarity_score(resume_string, job_description_string):
+    logger.info("Started getting similarity score")
+    qdrant_search = QdrantSearch([resume_string], job_description_string)
+    qdrant_search.update_qdrant()
+    search_result = qdrant_search.search()
+    logger.info("Finished getting similarity score")
+    return search_result
+
+
 if __name__ == "__main__":
-    # Load your resumes and job description data
-    resumes = ["resume_text_1", "resume_text_2", "resume_text_3"]
-    job_description = "job_description_text"
+    # To give your custom resume use this code
+    resume_dict = read_config(
+        READ_RESUME_FROM + "/Resume-bruce_wayne_fullstack.pdf4783d115-e6fc-462e-ae4d-479152884b28.json")
+    job_dict = read_config(
+        READ_JOB_DESCRIPTION_FROM + "/JobDescription-job_desc_full_stack_engineer_pdf4de00846-a4fe-4fe5-a4d7"
+                                    "-2a8a1b9ad020.json")
+    resume_keywords = resume_dict["extracted_keywords"]
+    job_description_keywords = job_dict["extracted_keywords"]
 
-    similarity_scorer = SimilarityScorer(resumes, job_description)
-    results = similarity_scorer.search()
-    for r in results:
+    resume_string = ' '.join(resume_keywords)
+    jd_string = ' '.join(job_description_keywords)
+    final_result = get_similarity_score(resume_string, jd_string)
+    for r in final_result:
         print(r)
